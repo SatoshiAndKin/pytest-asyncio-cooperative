@@ -18,4 +18,4 @@ build-backend = "poetry.core.masonry.api"
 asyncio-cooperative = "pytest_asyncio_cooperative.plugin"
 
 [tool.validation]
-focused_tests = ["tests/test_release.py"]
+focused_tests = ["tests/test_release.py", "tests/test_wait.py"]

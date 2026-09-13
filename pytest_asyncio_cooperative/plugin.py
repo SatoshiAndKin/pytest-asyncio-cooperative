@@ -220,21 +220,24 @@ async def run_tests(tasks, max_tasks: int, session, item_by_coro):
                 tasks[i] = asyncio.create_task(tasks[i])
 
         # Mark when the task was started
-        earliest_enqueue_time = time.time()
+        now = time.time()
+        time_to_wait = 30.0
         for task in tasks:
             if isinstance(task, asyncio.Task):
                 item = item_by_coro[get_coro(task)]
             else:
                 item = item_by_coro[task]
             if not hasattr(item, "enqueue_time"):
-                item.enqueue_time = time.time()
-            earliest_enqueue_time = min(item.enqueue_time, earliest_enqueue_time)
+                item.enqueue_time = now
+            if task not in cancelled:
+                time_to_wait = min(
+                    time_to_wait, max(0.0, item.enqueue_time + task_timeout - now)
+                )
 
-        time_to_wait = (time.time() - earliest_enqueue_time) - task_timeout
         done, pending = await asyncio.wait(
             tasks,
             return_when=asyncio.FIRST_COMPLETED,
-            timeout=min(30, int(time_to_wait)),
+            timeout=time_to_wait,
         )
 
         # Cancel tasks that have taken too long
