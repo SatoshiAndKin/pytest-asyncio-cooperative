@@ -294,9 +294,8 @@ async def run_tests(tasks, max_tasks: int, session, item_by_coro):
             del result
         done.clear()
 
-        if sidelined_tasks:
-            if len(tasks) < max_tasks:
-                tasks.append(sidelined_tasks.pop(0))
+        while sidelined_tasks and len(tasks) < max_tasks:
+            tasks.append(sidelined_tasks.pop(0))
 
     return flakes_to_retry
 

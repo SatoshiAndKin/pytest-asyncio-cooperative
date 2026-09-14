@@ -132,6 +132,8 @@ Tests are automatically cancelled after a timeout of 600s. You can change this w
 The scheduler waits for a test to finish or for the next deadline. It awaits
 cancelled tests' cleanup before reporting their results. Completed results and
 function fixture values are released after reporting and teardown.
+The scheduler then fills all available slots in queue order before waiting
+again. The configured concurrency limit remains unchanged.
 
 Maximum Asynchronous Tasks
 --------------------------
