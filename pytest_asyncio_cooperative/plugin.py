@@ -137,37 +137,68 @@ def cancel_task(task, now, item):
         task.cancel()
 
 
-def wrap_in_sync(item, result):
-    def outer():
-        def sync_wrapper():
-            new_task = item_to_task(item)
+class _TestResult:
+    """Transfer ownership from an async task to synchronous pytest reporting."""
 
-            # We use a new thread because we can't block for an async function
-            # in the same thread as the current running event loop, nor
-            # we can nest event loops
-            result = None
+    def __init__(self, item, task):
+        self.item = item
+        self.task = task
+        self.exception = None
 
-            def run_in_thread():
-                nonlocal result
+    def __call__(self):
+        # Retry plugins must run a new test, not consume the first result again.
+        self.item.runtest = self.retry
+        try:
+            return self.task.result()
+        except BaseException as exc:
+            # Task.result() consumes the original CancelledError. Own it until
+            # pytest finishes reporting, just like any other test exception.
+            self.exception = exc
+            raise
+        finally:
+            self.task = None
+
+    def retry(self):
+        if hasattr(self.item, "_asyncio_cooperative_cached_functions"):
+            self.item._asyncio_cooperative_cached_functions.clear()
+        new_task = item_to_task(self.item)
+        result = None
+
+        def run_in_thread():
+            nonlocal result
+            try:
+                result = asyncio.run(new_task)
+            except Exception as exc:
+                result = exc
+
+        thread = threading.Thread(target=run_in_thread)
+        thread.start()
+        thread.join()
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def close(self):
+        if self.exception is not None:
+            tb = self.exception.__traceback__
+            while tb is not None:
+                frame = tb.tb_frame
+                # Python 3.12 can keep a materialized f_locals dictionary after
+                # frame.clear(). Clear that dictionary after releasing the frame.
+                locals_snapshot = frame.f_locals
                 try:
-                    result = asyncio.run(new_task)
-                except Exception as e:
-                    result = e
-
-            thread = threading.Thread(target=run_in_thread)
-            thread.start()
-            thread.join()
-
-            if isinstance(result, Exception):
-                raise result  # type: ignore
-
-            return result
-
-        item.runtest = sync_wrapper
-
-        return result.result()
-
-    return outer
+                    frame.clear()
+                except RuntimeError:
+                    # Reporting can include the scheduler's still-active frame.
+                    pass
+                else:
+                    if frame.f_code.co_flags & inspect.CO_OPTIMIZED and isinstance(
+                        locals_snapshot, dict
+                    ):
+                        locals_snapshot.clear()
+                tb = tb.tb_next
+            self.exception = None
+        self.task = None
 
 
 async def run_tests(tasks, max_tasks: int, session, item_by_coro):
@@ -181,8 +212,7 @@ async def run_tests(tasks, max_tasks: int, session, item_by_coro):
         or session.config.getini("asyncio_task_timeout")
     )
 
-    completed = []
-    cancelled = []
+    cancelled = set()
     while tasks:
         # Schedule all the coroutines
         for i in range(len(tasks)):
@@ -190,21 +220,24 @@ async def run_tests(tasks, max_tasks: int, session, item_by_coro):
                 tasks[i] = asyncio.create_task(tasks[i])
 
         # Mark when the task was started
-        earliest_enqueue_time = time.time()
+        now = time.time()
+        time_to_wait = 30.0
         for task in tasks:
             if isinstance(task, asyncio.Task):
                 item = item_by_coro[get_coro(task)]
             else:
                 item = item_by_coro[task]
             if not hasattr(item, "enqueue_time"):
-                item.enqueue_time = time.time()
-            earliest_enqueue_time = min(item.enqueue_time, earliest_enqueue_time)
+                item.enqueue_time = now
+            if task not in cancelled:
+                time_to_wait = min(
+                    time_to_wait, max(0.0, item.enqueue_time + task_timeout - now)
+                )
 
-        time_to_wait = (time.time() - earliest_enqueue_time) - task_timeout
         done, pending = await asyncio.wait(
             tasks,
             return_when=asyncio.FIRST_COMPLETED,
-            timeout=min(30, int(time_to_wait)),
+            timeout=time_to_wait,
         )
 
         # Cancel tasks that have taken too long
@@ -214,11 +247,12 @@ async def run_tests(tasks, max_tasks: int, session, item_by_coro):
             item = item_by_coro[get_coro(task)]
             if task not in cancelled and task_timeout < now - item.enqueue_time:
                 cancel_task(task, now, item)
-                cancelled.append(task)
+                cancelled.add(task)
             tasks.append(task)
 
         for result in done:
-            item = item_by_coro[get_coro(result)]
+            item = item_by_coro.pop(get_coro(result))
+            cancelled.discard(result)
 
             # Flakey tests will be run again if they failed
             # TODO: add retry count
@@ -230,25 +264,38 @@ async def run_tests(tasks, max_tasks: int, session, item_by_coro):
                     new_task = item_to_task(item)
                     flakes_to_retry.append(new_task)
                     item_by_coro[new_task] = item
+                    if hasattr(item, "_asyncio_cooperative_cached_functions"):
+                        item._asyncio_cooperative_cached_functions.clear()
                     continue
 
             # We need to change .runtest to a synchronous function for pytest
             # however, if it is called again by retry libraries we need to rerun
             # the test instead of retuning the previous result
-            item.runtest = wrap_in_sync(item, result)
-
-            item.ihook.pytest_runtest_protocol(item=item, nextitem=None)
+            original_runtest = item.runtest
+            report_result = _TestResult(item, result)
+            item.runtest = report_result
+            try:
+                item.ihook.pytest_runtest_protocol(item=item, nextitem=None)
+            finally:
+                # Reports have rendered exceptions, and test_wrapper has run
+                # teardown. Release function-scoped values at this boundary.
+                item.runtest = original_runtest
+                if hasattr(item, "_asyncio_cooperative_cached_functions"):
+                    item._asyncio_cooperative_cached_functions.clear()
+                report_result.close()
 
             # Hack: See rewrite comment below
             # pytest_runttest_protocl will disable the rewrite assertion
             # so we renable it here
             activate_assert_rewrite(item)
 
-            completed.append(result)
+        # Do not keep the last result batch alive while waiting for new work.
+        if done:
+            del result
+        done.clear()
 
-        if sidelined_tasks:
-            if len(tasks) < max_tasks:
-                tasks.append(sidelined_tasks.pop(0))
+        while sidelined_tasks and len(tasks) < max_tasks:
+            tasks.append(sidelined_tasks.pop(0))
 
     return flakes_to_retry
 
