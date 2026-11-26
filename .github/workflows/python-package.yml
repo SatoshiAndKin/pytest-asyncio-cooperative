@@ -49,3 +49,8 @@ jobs:
     - name: Test with pytest
       run: |
         pytest tests/
+
+# Superseded PR validation must not hold runner capacity.
+concurrency:
+  group: pr-ci-python-package.yml-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
