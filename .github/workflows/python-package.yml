@@ -1,41 +1,58 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
+---
 name: Python package
-
-on:
+'on':
   push:
     paths:
-      - '**/*.py'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - 'requirements*.txt'
-      - '.github/workflows/python-package.yml'
-    branches: [ "master" ]
+    - "**/*.py"
+    - tests/**
+    - pyproject.toml
+    - requirements*.txt
+    - ".github/workflows/python-package.yml"
+    branches:
+    - master
   pull_request:
-    paths:
-      - '**/*.py'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - 'requirements*.txt'
-      - '.github/workflows/python-package.yml'
-    branches: [ "master" ]
-
+    branches:
+    - master
+concurrency:
+  group: pr-ci-python-package.yml-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 jobs:
+  ci_changes:
+    name: Select validation paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run_validation: "${{ steps.paths.outputs.run_validation }}"
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - id: paths
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        CI_INCLUDE_PATHS: '["**/*.py","tests/**","pyproject.toml","requirements*.txt",".github/workflows/python-package.yml"]'
+        CI_IGNORE_PATHS: "[]"
+      run: python3 .github/scripts/ci_changes.py
   build:
-
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
-
+        python-version:
+        - '3.8'
+        - '3.9'
+        - '3.10'
+        - '3.11'
+        - '3.12'
+        - '3.13'
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "${{ matrix.python-version }}"
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -44,13 +61,33 @@ jobs:
         python -m pip install .
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
     - name: Check code formatting with Black
-      run: |
-        black --check .
-    - name: Test with pytest
-      run: |
-        pytest tests/
+      run: 'black --check .
 
-# Superseded PR validation must not hold runner capacity.
-concurrency:
-  group: pr-ci-python-package.yml-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+        '
+    - name: Test with pytest
+      run: 'pytest tests/
+
+        '
+    needs:
+    - ci_changes
+    if: "${{ needs.ci_changes.outputs.run_validation == 'true' }}"
+  ci_gate:
+    name: CI (python-package.yml)
+    if: "${{ !cancelled() }}"
+    needs:
+    - ci_changes
+    - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Verify validation contract
+      env:
+        CI_GATE_NEEDS: "${{ toJSON(needs) }}"
+        CI_EXPECTED_JOBS: '["build"]'
+      run: |-
+        python3 -m unittest discover -s .github/scripts -p test_ci_contract.py
+        python3 .github/scripts/ci_gate.py
