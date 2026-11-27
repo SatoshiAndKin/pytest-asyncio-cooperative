@@ -133,3 +133,12 @@ Maximum Asynchronous Tasks
 --------------------------
 
 Sometimes you want to limit the number of tasks running concurrently. You can set a maximum with the `--max-asyncio-tasks` option by adding a `max_asyncio_tasks` entry to your `pytest.ini` file.
+
+Continuous integration
+======================
+
+Pull requests require the ``CI (python-package.yml)`` check. Relevant source,
+test, dependency, and CI changes run the full supported Python matrix.
+Documentation-only changes report the same required gate without starting
+the test matrix. The gate rejects missing, failed, cancelled, or unexpectedly
+skipped validation results.
