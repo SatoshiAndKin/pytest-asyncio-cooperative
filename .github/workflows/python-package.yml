@@ -35,6 +35,8 @@ jobs:
         CI_INCLUDE_PATHS: '["**/*.py","tests/**","pyproject.toml","requirements*.txt",".github/workflows/python-package.yml"]'
         CI_IGNORE_PATHS: "[]"
       run: python3 .github/scripts/ci_changes.py
+    - name: Wait for cancellation canary
+      run: sleep 120
   build:
     runs-on: ubuntu-22.04
     strategy:
